@@ -2,7 +2,7 @@
  * admin.js — Protected Admin API Route (Powered by Supabase)
  *
  * Routes:
- *   POST   /api/admin/login             — Authenticate admin
+ *   POST   /api/admin/login             — Authenticate admin (Rate-limited, timing-safe)
  *   GET    /api/admin/me                — Verify current admin session
  *   POST   /api/admin/logout            — Invalidate session
  *   GET    /api/admin/stats             — Dashboard metrics from Supabase
@@ -21,15 +21,38 @@ import {
   downloadStorageBuffer,
   mapOrderRowToModel,
 } from '../supabase.js';
+import { adminLoginLimiter, adminEndpointsLimiter } from '../middleware/security.js';
 
 const router = Router();
 
-// Default admin credentials (configurable via environment)
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@stringart.io';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+// Admin credentials MUST come from environment variables — no hardcoded fallback
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+  console.warn(
+    '[admin] ⚠️ ADMIN_EMAIL or ADMIN_PASSWORD is not set in environment variables.\n' +
+    'Admin login will be disabled until configured.'
+  );
+}
 
 // In-memory session store (token -> session)
 const activeSessions = new Map();
+
+/**
+ * Constant-time string comparison to prevent timing-attack side channels.
+ */
+function safeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    // Constant time check against itself to avoid leaking length difference timing
+    crypto.timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 // ── Auth Middleware ──────────────────────────────────────────────────────────
 export function requireAdminAuth(req, res, next) {
@@ -50,17 +73,22 @@ export function requireAdminAuth(req, res, next) {
 }
 
 // ── POST /api/admin/login ────────────────────────────────────────────────────
-router.post('/login', (req, res) => {
+router.post('/login', adminLoginLimiter, (req, res) => {
   const { email, password } = req.body || {};
 
-  if (!email || !password) {
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    console.error('[admin] Admin login attempted but ADMIN_EMAIL/ADMIN_PASSWORD is not configured.');
+    return res.status(500).json({ error: 'Admin service authentication is not configured.' });
+  }
+
+  if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
-  if (
-    email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase() &&
-    password === ADMIN_PASSWORD
-  ) {
+  const emailMatches = safeCompare(email.trim().toLowerCase(), ADMIN_EMAIL.trim().toLowerCase());
+  const passwordMatches = safeCompare(password, ADMIN_PASSWORD);
+
+  if (emailMatches && passwordMatches) {
     const token = 'sat_' + crypto.randomBytes(32).toString('hex');
     const sessionData = {
       email: ADMIN_EMAIL,
@@ -70,18 +98,23 @@ router.post('/login', (req, res) => {
 
     activeSessions.set(token, sessionData);
 
-    console.log(`[admin] Admin successfully logged in: ${ADMIN_EMAIL}`);
+    console.log(`[admin] Admin successfully authenticated: ${ADMIN_EMAIL}`);
     return res.json({
       success: true,
       token,
-      admin: sessionData,
+      admin: sessionData, // Never returns password
     });
   }
 
+  // Failed login: Never log the attempted password
+  console.warn(`[admin] Failed login attempt for email: ${String(email).slice(0, 50)}`);
   return res.status(401).json({
     error: 'Invalid admin email or password',
   });
 });
+
+// ── Apply general admin rate limiter & auth to all following routes ───────────
+router.use(adminEndpointsLimiter);
 
 // ── GET /api/admin/me ────────────────────────────────────────────────────────
 router.get('/me', requireAdminAuth, (req, res) => {
@@ -109,8 +142,8 @@ router.get('/stats', requireAdminAuth, async (_req, res) => {
       .select('order_status, price');
 
     if (error) {
-      console.error('[admin] Error fetching stats from Supabase:', error.message);
-      return res.status(500).json({ error: error.message });
+      console.error('[admin] Error fetching stats:', error.message);
+      return res.status(500).json({ error: 'Failed to fetch dashboard statistics' });
     }
 
     const orders = rows || [];
@@ -137,8 +170,9 @@ router.get('/stats', requireAdminAuth, async (_req, res) => {
       },
     });
   } catch (err) {
-    console.error('[admin] Stats exception:', err);
-    res.status(500).json({ error: err.message || 'Failed to fetch dashboard stats' });
+    console.error('[admin] Stats exception:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to fetch dashboard statistics' : err.message });
   }
 });
 
@@ -154,21 +188,21 @@ router.get('/orders', requireAdminAuth, async (req, res) => {
 
     // Status filter
     if (status && status !== 'all') {
-      query = query.eq('order_status', status);
+      query = query.eq('order_status', String(status).slice(0, 32));
     }
 
     const { data: rows, error } = await query;
 
     if (error) {
-      console.error('[admin] Error querying orders from Supabase:', error.message);
-      return res.status(500).json({ error: error.message });
+      console.error('[admin] Error querying orders:', error.message);
+      return res.status(500).json({ error: 'Failed to retrieve orders' });
     }
 
     let orders = (rows || []).map((r) => mapOrderRowToModel(r));
 
     // Search filter across orderNumber, customer name, city, phone
-    if (search && search.trim()) {
-      const q = search.trim().toLowerCase();
+    if (search && typeof search === 'string' && search.trim()) {
+      const q = search.trim().toLowerCase().slice(0, 64);
       orders = orders.filter((o) => {
         const numMatch = o.orderNumber?.toLowerCase().includes(q);
         const nameMatch = o.customer?.fullName?.toLowerCase().includes(q);
@@ -183,8 +217,9 @@ router.get('/orders', requireAdminAuth, async (req, res) => {
       orders,
     });
   } catch (err) {
-    console.error('[admin] Orders listing exception:', err);
-    res.status(500).json({ error: err.message || 'Failed to retrieve orders' });
+    console.error('[admin] Orders listing exception:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to retrieve orders' : err.message });
   }
 });
 
@@ -192,15 +227,16 @@ router.get('/orders', requireAdminAuth, async (req, res) => {
 router.get('/orders/:id', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
+    const sanitizedId = String(id).trim().slice(0, 32);
 
     const { data: row, error } = await supabase
       .from('orders')
       .select('*')
-      .ilike('order_number', id.trim())
+      .ilike('order_number', sanitizedId)
       .single();
 
     if (error || !row) {
-      return res.status(404).json({ error: `Order ${id} not found` });
+      return res.status(404).json({ error: `Order ${sanitizedId} not found` });
     }
 
     // Generate signed URLs for private files in Supabase Storage
@@ -224,8 +260,9 @@ router.get('/orders/:id', requireAdminAuth, async (req, res) => {
       },
     });
   } catch (err) {
-    console.error('[admin] Order detail exception:', err);
-    res.status(500).json({ error: err.message || 'Failed to retrieve order details' });
+    console.error('[admin] Order detail exception:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to retrieve order details' : err.message });
   }
 });
 
@@ -233,6 +270,7 @@ router.get('/orders/:id', requireAdminAuth, async (req, res) => {
 router.patch('/orders/:id', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
+    const sanitizedId = String(id).trim().slice(0, 32);
     const { orderStatus, paymentStatus } = req.body || {};
 
     const validOrderStatuses = ['new', 'confirmed', 'in_production', 'shipped', 'delivered', 'cancelled'];
@@ -259,25 +297,26 @@ router.patch('/orders/:id', requireAdminAuth, async (req, res) => {
     const { data: updatedRow, error } = await supabase
       .from('orders')
       .update(updates)
-      .ilike('order_number', id.trim())
+      .ilike('order_number', sanitizedId)
       .select()
       .single();
 
     if (error || !updatedRow) {
-      return res.status(404).json({ error: `Order ${id} not found or update failed: ${error?.message}` });
+      return res.status(404).json({ error: `Order ${sanitizedId} not found or update failed` });
     }
 
     const order = mapOrderRowToModel(updatedRow);
 
-    console.log(`[admin] Updated order ${order.orderNumber} in Supabase: status=${order.orderStatus}, payment=${order.paymentStatus}`);
+    console.log(`[admin] Updated order ${order.orderNumber}: status=${order.orderStatus}, payment=${order.paymentStatus}`);
 
     res.json({
       success: true,
       order,
     });
   } catch (err) {
-    console.error('[admin] Update order exception:', err);
-    res.status(500).json({ error: err.message || 'Failed to update order' });
+    console.error('[admin] Update order exception:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to update order' : err.message });
   }
 });
 
@@ -285,11 +324,12 @@ router.patch('/orders/:id', requireAdminAuth, async (req, res) => {
 router.get('/orders/:id/sequence', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
+    const sanitizedId = String(id).trim().slice(0, 32);
 
     const { data: row, error } = await supabase
       .from('orders')
       .select('order_number, sequence_file_path')
-      .ilike('order_number', id.trim())
+      .ilike('order_number', sanitizedId)
       .single();
 
     if (error || !row || !row.sequence_file_path) {
@@ -305,8 +345,9 @@ router.get('/orders/:id/sequence', requireAdminAuth, async (req, res) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.send(buffer);
   } catch (err) {
-    console.error('[admin] Sequence download exception:', err);
-    res.status(500).json({ error: err.message || 'Failed to download sequence file' });
+    console.error('[admin] Sequence download exception:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to download sequence file' : err.message });
   }
 });
 

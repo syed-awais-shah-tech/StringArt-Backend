@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
     original_file_path TEXT,
     preview_file_path TEXT,
     sequence_file_path TEXT,
+    idempotency_key TEXT UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );

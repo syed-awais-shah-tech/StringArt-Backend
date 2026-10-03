@@ -1,69 +1,90 @@
 /**
  * index.js — Express server entry point
- * StringArt ERN Stack Backend (Cloud Run & Supabase Production Ready)
+ * StringArt ERN Stack Backend (Cloud Run & Supabase Production Ready with Security Protections)
  */
 
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import generateRouter from './routes/generate.js';
 import ordersRouter from './routes/orders.js';
 import adminRouter from './routes/admin.js';
+import { generalLimiter } from './middleware/security.js';
 import { ensureStorageBucket } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Google Cloud Run automatically passes PORT (default 8080)
 const PORT = process.env.PORT || 3001;
 const HOST = '0.0.0.0';
+const isProduction = process.env.NODE_ENV === 'production';
 
-// ── Middleware & CORS ─────────────────────────────────────────────────────────
-const defaultOrigins = [
+// Trust first proxy for accurate client IP identification in Cloud Run / reverse proxies
+app.set('trust proxy', 1);
+
+// ── 1. Security Headers (Helmet) ─────────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allows cross-origin frontend asset access
+}));
+
+// ── 2. Strict CORS Configuration ─────────────────────────────────────────────
+const rawClientOrigin = process.env.CLIENT_ORIGIN || '';
+const productionOrigins = rawClientOrigin
+  .split(',')
+  .map((o) => o.trim())
+  .filter((o) => o.length > 0 && o !== '*'); // Disallow '*' in production
+
+const developmentOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
   'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+  ...productionOrigins,
 ];
 
-const envOrigins = process.env.CLIENT_ORIGIN
-  ? process.env.CLIENT_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
-  : [];
-
-const allowedOrigins = [...defaultOrigins, ...envOrigins];
-
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
-    // Allow non-browser requests (curl, server-to-server, Cloud Run health probes)
-    if (!origin) return callback(null, true);
-
-    // Allow configured origins or wildcard
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+    // Allow non-browser requests without origin header (e.g. server-to-server, curl, Cloud Run health checks)
+    if (!origin) {
       return callback(null, true);
     }
 
-    // Automatically allow any Cloud Run deployed frontend domain
-    if (origin.endsWith('.run.app')) {
+    if (isProduction) {
+      if (productionOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'));
+    }
+
+    // In development allow localhost ports or configured origin
+    if (developmentOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       return callback(null, true);
     }
 
-    // In non-production development, allow any origin
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-
-    // Fallback: reflect origin for safe cross-origin access
-    return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   exposedHeaders: ['X-Preview-Data', 'Content-Disposition'],
-}));
+};
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cors(corsOptions));
+
+// ── 3. Reduced Body-Parser Limits ────────────────────────────────────────────
+// Specific body parser for orders route (receives base64 uploaded image/preview)
+app.use('/api/orders', express.json({ limit: '10mb' }));
+app.use('/api/orders', express.urlencoded({ limit: '10mb', extended: true }));
+
+// General body parser for all other requests: strict 100kb limit
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ limit: '100kb', extended: true }));
 
 // Serve saved order uploads statically if needed (backward compatibility)
 app.use('/data', express.static(path.join(__dirname, 'data')));
@@ -88,7 +109,10 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// ── Application Routes ────────────────────────────────────────────────────────
+// ── 4. Application Routes with Rate Limiting ──────────────────────────────────
+// General API rate limiter (100 requests per IP per 15 minutes)
+app.use('/api', generalLimiter);
+
 app.use('/api', generateRouter);
 app.use('/api', ordersRouter);
 app.use('/api/admin', adminRouter);
@@ -124,6 +148,24 @@ if (fs.existsSync(clientDist)) {
     res.sendFile(path.join(clientDist, 'index.html'));
   });
 }
+
+// ── 5. Centralized Error Handling Middleware ─────────────────────────────────
+app.use((err, req, res, _next) => {
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'Not allowed by CORS' });
+  }
+
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({ error: 'Request payload too large (maximum 100kb for JSON requests).' });
+  }
+
+  const statusCode = err.status || err.statusCode || 500;
+  console.error(`[server] Error on ${req.method} ${req.path}:`, err.message);
+
+  res.status(statusCode).json({
+    error: isProduction ? 'An unexpected server error occurred.' : (err.message || 'Internal server error'),
+  });
+});
 
 // ── Start Server ──────────────────────────────────────────────────────────────
 const server = app.listen(PORT, HOST, async () => {

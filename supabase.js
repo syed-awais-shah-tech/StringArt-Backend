@@ -215,6 +215,8 @@ export function mapOrderRowToModel(row, signedUrls = {}) {
     original_file_path: row.original_file_path,
     preview_file_path: row.preview_file_path,
     sequence_file_path: row.sequence_file_path,
+    idempotencyKey: row.idempotency_key || null,
+    idempotency_key: row.idempotency_key || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
