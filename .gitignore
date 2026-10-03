@@ -10,10 +10,15 @@ lerna-debug.log*
 # Node modules
 node_modules/
 
-# Environment files
+# Environment files and secrets
 .env
-.env.local
-.env.*.local
+.env*
+!.env.example
+*.env
+
+# Local orders uploads
+data/orders/*
+!data/orders/.gitkeep
 
 # Editor files
 .vscode/*

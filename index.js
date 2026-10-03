@@ -1,15 +1,18 @@
 /**
  * index.js — Express server entry point
- * StringArt Backend API & Algorithmic Engine
+ * StringArt ERN Stack Backend (with Supabase)
  */
 
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import generateRouter from './routes/generate.js';
 import ordersRouter from './routes/orders.js';
 import adminRouter from './routes/admin.js';
+import { ensureStorageBucket } from './supabase.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +36,7 @@ app.use(cors({
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
       return callback(null, true);
     }
+    // Allow in non-production or fallback
     return callback(null, true);
   },
   credentials: true,
@@ -41,7 +45,7 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Serve saved order uploads statically if needed
+// Serve saved order uploads statically if needed (backward compatibility)
 app.use('/data', express.static(path.join(__dirname, 'data')));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -49,31 +53,55 @@ app.use('/api', generateRouter);
 app.use('/api', ordersRouter);
 app.use('/api/admin', adminRouter);
 
-// Service Root
+// Root greeting
 app.get('/', (_req, res) => {
   res.json({
-    service: 'StringArt Backend API',
+    name: 'StringArt Backend API',
     status: 'online',
     version: '1.0.0',
+    storage: 'Supabase',
     endpoints: {
-      health: 'GET /api/health',
       generate: 'POST /api/generate',
-      orders: 'GET, POST /api/orders',
-      admin: '/api/admin/*',
+      createOrder: 'POST /api/orders',
+      getOrder: 'GET /api/orders/:orderNumber',
+      adminLogin: 'POST /api/admin/login',
+      adminOrders: 'GET /api/admin/orders',
+      adminStats: 'GET /api/admin/stats',
+      health: 'GET /api/health',
     },
   });
 });
 
+// Serve built frontend if available
+const clientDist = path.join(__dirname, '..', 'client', 'dist');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/data')) {
+      return next();
+    }
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
+
 // Health check
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', version: '1.0.0', engine: 'StringArt JS' });
+  res.json({
+    status: 'ok',
+    version: '1.0.0',
+    engine: 'StringArt JS',
+    storage: 'Supabase',
+  });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`╔══════════════════════════════════════════╗`);
   console.log(`║   StringArt Server  →  http://localhost:${PORT} ║`);
   console.log(`╚══════════════════════════════════════════╝`);
+
+  // Verify Supabase bucket
+  await ensureStorageBucket();
 });
 
 export default app;

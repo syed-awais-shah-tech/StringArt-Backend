@@ -1,90 +1,60 @@
 /**
- * orders.js — Customer Order System (Cash on Delivery)
+ * orders.js — Customer Order System (Cash on Delivery with Supabase)
  *
  * Routes:
- *   POST /api/orders      — Create a new customer order
+ *   POST /api/orders      — Create a new customer order (Database + Storage)
  *   GET  /api/orders/:id  — Retrieve order details by order number
  *   GET  /api/orders      — List all orders (internal/admin)
  */
 
 import { Router } from 'express';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import {
+  supabase,
+  ensureStorageBucket,
+  uploadBase64ToStorage,
+  uploadTextToStorage,
+  mapOrderRowToModel,
+} from '../supabase.js';
 
 const router = Router();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const ORDERS_FILE = path.join(DATA_DIR, 'orders.json');
-const ORDERS_UPLOADS_DIR = path.join(DATA_DIR, 'orders');
-
-// Ensure directories and storage file exist
-function ensureStorage() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(ORDERS_UPLOADS_DIR)) {
-    fs.mkdirSync(ORDERS_UPLOADS_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(ORDERS_FILE)) {
-    fs.writeFileSync(ORDERS_FILE, JSON.stringify([], null, 2), 'utf-8');
-  }
-}
-
-// Read all orders safely
-function readOrders() {
-  ensureStorage();
+/**
+ * Generate sequential order number e.g. SA-1001, SA-1002 from Supabase orders table
+ */
+async function generateNextOrderNumber() {
   try {
-    const raw = fs.readFileSync(ORDERS_FILE, 'utf-8');
-    return JSON.parse(raw);
+    const { data, error } = await supabase
+      .from('orders')
+      .select('order_number')
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    if (error) {
+      console.warn('[orders] Could not query latest order numbers from Supabase:', error.message);
+      return `SA-${1001 + Math.floor(Math.random() * 8000)}`;
+    }
+
+    const existingNums = (data || [])
+      .map((o) => {
+        const match = typeof o.order_number === 'string' && o.order_number.match(/^SA-(\d+)$/i);
+        return match ? parseInt(match[1], 10) : null;
+      })
+      .filter((n) => n !== null && !isNaN(n));
+
+    const nextNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 1001;
+    return `SA-${nextNum}`;
   } catch (err) {
-    console.error('[orders] Error reading orders.json:', err);
-    return [];
-  }
-}
-
-// Write orders atomically
-function writeOrders(orders) {
-  ensureStorage();
-  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), 'utf-8');
-}
-
-// Generate sequential order number e.g. SA-1001, SA-1002
-function generateOrderNumber(orders) {
-  const existingNums = orders
-    .map((o) => {
-      const match = typeof o.orderNumber === 'string' && o.orderNumber.match(/^SA-(\d+)$/i);
-      return match ? parseInt(match[1], 10) : null;
-    })
-    .filter((n) => n !== null && !isNaN(n));
-
-  const nextNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 1001;
-  return `SA-${nextNum}`;
-}
-
-// Helper to save base64 / dataURL to file
-function saveBase64File(dataUrlOrBase64, targetPath) {
-  if (!dataUrlOrBase64 || typeof dataUrlOrBase64 !== 'string') return null;
-
-  try {
-    const matches = dataUrlOrBase64.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
-    const base64Data = matches ? matches[2] : dataUrlOrBase64;
-    const buffer = Buffer.from(base64Data, 'base64');
-    fs.writeFileSync(targetPath, buffer);
-    return true;
-  } catch (err) {
-    console.error('[orders] Failed to save base64 file:', err);
-    return false;
+    console.error('[orders] Error generating order number:', err.message);
+    return `SA-${Date.now().toString().slice(-4)}`;
   }
 }
 
 /**
  * POST /api/orders
- * Submit a customer order with Cash on Delivery
+ * Submit a customer order with Cash on Delivery (COD)
+ * Saves metadata to Supabase DB and files to Supabase Storage
  */
-router.post('/orders', (req, res) => {
+router.post('/orders', async (req, res) => {
   try {
     const {
       customer = {},
@@ -117,87 +87,95 @@ router.post('/orders', (req, res) => {
       });
     }
 
-    const orders = readOrders();
-    const orderNumber = generateOrderNumber(orders);
+    // Ensure storage bucket is ready
+    await ensureStorageBucket();
 
-    // ── File saving ─────────────────────────────────────────────────────────
-    const files = {
-      originalImage: null,
-      previewImage: null,
-      sequenceFile: null,
-    };
+    // Generate unique order number
+    const orderNumber = await generateNextOrderNumber();
 
-    // 1. Save original image if provided
+    // ── Supabase Storage Uploads ────────────────────────────────────────────
+    let originalFilePath = null;
+    let previewFilePath = null;
+    let sequenceFilePath = null;
+
+    // 1. Upload original image if provided
     if (originalImageData) {
       const extMatch = originalImageData.match(/^data:image\/([a-zA-Z0-9]+);base64,/);
-      const ext = extMatch && extMatch[1] === 'jpeg' ? 'jpg' : extMatch ? extMatch[1] : 'png';
-      const origFileName = `${orderNumber}-original.${ext}`;
-      const origFilePath = path.join(ORDERS_UPLOADS_DIR, origFileName);
-      if (saveBase64File(originalImageData, origFilePath)) {
-        files.originalImage = `orders/${origFileName}`;
-      }
-    }
-
-    // 2. Save preview image if provided
-    if (previewImageData) {
-      const prevFileName = `${orderNumber}-preview.png`;
-      const prevFilePath = path.join(ORDERS_UPLOADS_DIR, prevFileName);
-      if (saveBase64File(previewImageData, prevFilePath)) {
-        files.previewImage = `orders/${prevFileName}`;
-      }
-    }
-
-    // 3. Save sequence file
-    if (sequenceText && typeof sequenceText === 'string') {
-      const seqFileName = `${orderNumber}-sequence.txt`;
-      const seqFilePath = path.join(ORDERS_UPLOADS_DIR, seqFileName);
+      const ext = extMatch && extMatch[1] === 'jpeg' ? 'jpg' : extMatch ? extMatch[1] : 'jpg';
+      const targetStoragePath = `orders/${orderNumber}/original.${ext}`;
       try {
-        fs.writeFileSync(seqFilePath, sequenceText, 'utf-8');
-        files.sequenceFile = `orders/${seqFileName}`;
+        await uploadBase64ToStorage(originalImageData, targetStoragePath, `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+        originalFilePath = targetStoragePath;
       } catch (err) {
-        console.error('[orders] Failed to save sequence file:', err);
+        console.error('[orders] Failed to upload original image to Supabase Storage:', err.message);
       }
     }
 
-    // ── Construct Order Record ──────────────────────────────────────────────
-    const newOrder = {
-      orderNumber,
-      createdAt: new Date().toISOString(),
-      customer: {
-        fullName: customer.fullName.trim(),
-        email: customer.email ? customer.email.trim() : '',
-        phone: customer.phone.trim(),
-        address: customer.address.trim(),
-        city: customer.city.trim(),
-      },
-      product: {
-        name: product.name || 'Custom Handcrafted String Art (50 cm)',
-        price: typeof product.price === 'number' ? product.price : 175,
-        currency: product.currency || 'GBP',
-      },
-      paymentMethod: 'COD',
-      paymentStatus: 'pending',
-      orderStatus: 'new',
-      files,
-      metadata: {
-        totalLines: previewMetadata?.totalLines || 3000,
-        boardSize: '50 cm circular',
-        numNails: previewMetadata?.numNails || 200,
-      },
+    // 2. Upload generated preview image if provided
+    if (previewImageData) {
+      const targetStoragePath = `orders/${orderNumber}/preview.png`;
+      try {
+        await uploadBase64ToStorage(previewImageData, targetStoragePath, 'image/png');
+        previewFilePath = targetStoragePath;
+      } catch (err) {
+        console.error('[orders] Failed to upload preview image to Supabase Storage:', err.message);
+      }
+    }
+
+    // 3. Upload sequence instructions if provided
+    if (sequenceText && typeof sequenceText === 'string') {
+      const targetStoragePath = `orders/${orderNumber}/sequence.txt`;
+      try {
+        await uploadTextToStorage(sequenceText, targetStoragePath, 'text/plain; charset=utf-8');
+        sequenceFilePath = targetStoragePath;
+      } catch (err) {
+        console.error('[orders] Failed to upload sequence to Supabase Storage:', err.message);
+      }
+    }
+
+    // ── Insert into Supabase Orders Table ───────────────────────────────────
+    const orderPayload = {
+      order_number: orderNumber,
+      full_name: customer.fullName.trim(),
+      email: customer.email ? customer.email.trim() : '',
+      phone: customer.phone.trim(),
+      address: customer.address.trim(),
+      city: customer.city.trim(),
+      product_name: product.name || 'Custom Handcrafted String Art (50 cm)',
+      price: typeof product.price === 'number' ? product.price : 175.0,
+      payment_method: 'COD',
+      payment_status: 'pending',
+      order_status: 'new',
+      original_file_path: originalFilePath,
+      preview_file_path: previewFilePath,
+      sequence_file_path: sequenceFilePath,
     };
 
-    orders.push(newOrder);
-    writeOrders(orders);
+    const { data: insertedOrder, error: insertError } = await supabase
+      .from('orders')
+      .insert(orderPayload)
+      .select()
+      .single();
 
-    console.log(`[orders] Successfully created order ${orderNumber} for ${newOrder.customer.fullName}`);
+    if (insertError) {
+      console.error('[orders] Supabase database insert error:', insertError);
+      return res.status(500).json({
+        error: 'Failed to save order to database',
+        details: insertError.message,
+      });
+    }
 
-    res.status(201).json({
+    const appOrder = mapOrderRowToModel(insertedOrder);
+
+    console.log(`[orders] Successfully created order ${orderNumber} in Supabase for ${appOrder.customer.fullName}`);
+
+    return res.status(201).json({
       success: true,
-      order: newOrder,
+      order: appOrder,
     });
   } catch (err) {
     console.error('[orders] Order creation failed:', err);
-    res.status(500).json({ error: err.message || 'Failed to create order' });
+    return res.status(500).json({ error: err.message || 'Failed to create order' });
   }
 });
 
@@ -205,20 +183,24 @@ router.post('/orders', (req, res) => {
  * GET /api/orders/:orderNumber
  * Fetch order details by order number
  */
-router.get('/orders/:orderNumber', (req, res) => {
+router.get('/orders/:orderNumber', async (req, res) => {
   try {
-    const orders = readOrders();
-    const order = orders.find(
-      (o) => o.orderNumber?.toUpperCase() === req.params.orderNumber?.toUpperCase()
-    );
+    const { orderNumber } = req.params;
+    const { data: orderRow, error } = await supabase
+      .from('orders')
+      .select('*')
+      .ilike('order_number', orderNumber.trim())
+      .single();
 
-    if (!order) {
-      return res.status(404).json({ error: 'Order not found' });
+    if (error || !orderRow) {
+      return res.status(404).json({ error: `Order ${orderNumber} not found` });
     }
 
-    res.json({ order });
+    const order = mapOrderRowToModel(orderRow);
+    return res.json({ order });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to retrieve order' });
+    console.error('[orders] Error retrieving order:', err);
+    return res.status(500).json({ error: err.message || 'Failed to retrieve order' });
   }
 });
 
@@ -226,12 +208,21 @@ router.get('/orders/:orderNumber', (req, res) => {
  * GET /api/orders
  * List orders (internal / testing)
  */
-router.get('/orders', (_req, res) => {
+router.get('/orders', async (_req, res) => {
   try {
-    const orders = readOrders();
-    res.json({ count: orders.length, orders });
+    const { data: rows, error } = await supabase
+      .from('orders')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const orders = (rows || []).map((r) => mapOrderRowToModel(r));
+    return res.json({ count: orders.length, orders });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to list orders' });
+    return res.status(500).json({ error: err.message || 'Failed to list orders' });
   }
 });
 
