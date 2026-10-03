@@ -126,7 +126,7 @@ router.post('/orders', async (req, res) => {
     if (sequenceText && typeof sequenceText === 'string') {
       const targetStoragePath = `orders/${orderNumber}/sequence.txt`;
       try {
-        await uploadTextToStorage(sequenceText, targetStoragePath, 'text/plain; charset=utf-8');
+        await uploadTextToStorage(sequenceText, targetStoragePath, 'text/plain');
         sequenceFilePath = targetStoragePath;
       } catch (err) {
         console.error('[orders] Failed to upload sequence to Supabase Storage:', err.message);

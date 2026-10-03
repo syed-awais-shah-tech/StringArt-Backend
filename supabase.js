@@ -93,7 +93,7 @@ export async function uploadBase64ToStorage(dataUrlOrBase64, storagePath, defaul
 /**
  * Upload text content (e.g. sequence.txt) to private Supabase Storage
  */
-export async function uploadTextToStorage(textContent, storagePath, mimeType = 'text/plain; charset=utf-8') {
+export async function uploadTextToStorage(textContent, storagePath, mimeType = 'text/plain') {
   if (textContent === undefined || textContent === null) return null;
 
   const buffer = Buffer.from(String(textContent), 'utf-8');
