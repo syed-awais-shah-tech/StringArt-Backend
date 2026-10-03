@@ -1,4 +1,4 @@
-# 🧶 StringArt — Backend & Generation Engine
+﻿# 🧵 StringArt — Backend & Generation Engine
 
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white" alt="Node.js" />
@@ -24,8 +24,8 @@ The backend consists of two main pillars:
    - **Greedy Bresenham Error Minimization** (`scoreCalculator.js`): Line candidate evaluation reducing residual error between the woven canvas and the source photograph.
    - **Sequence Formatter** (`sequenceFormatter.js`): Exports step-by-step pin instruction files (`sequence.txt`) for physical workshop looms.
 2. **RESTful E-Commerce & Order Management** (`routes/`):
-   - Customer Cash on Delivery order creation and asset persistence.
-   - Protected Shopify-style administration dashboard API.
+   - Customer Cash on Delivery order creation and asset persistence in Supabase.
+   - Protected Shopify-style administration dashboard API with HttpOnly cookie JWT authentication.
 
 ---
 
@@ -42,13 +42,13 @@ The backend consists of two main pillars:
 
 ### Protected Admin Endpoints
 
-*All `/api/admin/*` routes require `Authorization: Bearer <token>` header.*
+*All `/api/admin/*` routes require `admin_jwt` HttpOnly cookie authentication.*
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/admin/login` | Authenticates admin (`admin@stringart.io` / `admin123`) and issues session token |
-| `GET` | `/api/admin/me` | Validates current session token |
-| `POST` | `/api/admin/logout` | Revokes and invalidates session token |
+| `POST` | `/api/admin/login` | Authenticates admin against Supabase and issues HttpOnly JWT cookie |
+| `GET` | `/api/admin/me` | Validates current session from cookie |
+| `POST` | `/api/admin/logout` | Clears admin authentication cookie |
 | `GET` | `/api/admin/stats` | Returns dashboard KPIs (Total, New, In Production, Shipped, Revenue) |
 | `GET` | `/api/admin/orders` | Lists orders with search query and status filters |
 | `GET` | `/api/admin/orders/:id` | Full order details with inline sequence preview |
@@ -94,9 +94,10 @@ Copy `.env.example` to `.env` to configure:
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `PORT` | Port to listen on | `3001` |
-| `ADMIN_EMAIL` | Admin login email | `admin@stringart.io` |
-| `ADMIN_PASSWORD` | Admin login password | `admin123` |
+| `JWT_SECRET` | Secret key for signing admin session cookies | Secure random string |
 | `CLIENT_ORIGIN` | Allowed CORS frontend origin | `http://localhost:5173` |
+| `SUPABASE_URL` | Supabase project URL | (required) |
+| `SUPABASE_SECRET_KEY` | Supabase service role secret key | (required) |
 | `NODE_ENV` | Node environment | `development` |
 
 ---
@@ -134,6 +135,7 @@ StringArt-Backend/
 │   ├── nailGenerator.js     # Perimeter nail trigonometry
 │   ├── scoreCalculator.js   # Bresenham greedy residual minimization
 │   └── sequenceFormatter.js # Sequence instruction file builder
+├── middleware/              # Rate limiters & security middleware
 ├── routes/                  # Express API routers
 │   ├── admin.js             # Protected admin auth & order actions
 │   ├── generate.js          # Photo generation handler

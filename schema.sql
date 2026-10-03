@@ -58,3 +58,24 @@ VALUES (
     ARRAY['image/jpeg', 'image/png', 'image/webp', 'text/plain']
 )
 ON CONFLICT (id) DO NOTHING;
+
+-- 5. Admins table for secure database-backed authentication
+CREATE TABLE IF NOT EXISTS public.admins (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT 'Administrator',
+    reset_token_hash TEXT,
+    reset_token_expires TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_admins_email ON public.admins (email);
+
+DROP TRIGGER IF EXISTS trigger_admins_updated_at ON public.admins;
+CREATE TRIGGER trigger_admins_updated_at
+    BEFORE UPDATE ON public.admins
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+

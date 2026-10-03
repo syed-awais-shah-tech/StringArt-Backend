@@ -21,10 +21,9 @@ This guide covers building, containerizing, and deploying the **StringArt Backen
 | `SUPABASE_URL` | **Yes** | Your Supabase Project API URL | `https://your-ref.supabase.co` |
 | `SUPABASE_SECRET_KEY`| **Yes** | Supabase Service Role Secret Key (Server-side ONLY) | `eyJhbGci...` |
 | `CLIENT_ORIGIN` | **Yes** | URL of your deployed Cloud Run Frontend | `https://stringart-frontend-xyz.run.app` |
-| `ADMIN_EMAIL` | Optional | Email for admin order dashboard login | `admin@stringart.io` |
-| `ADMIN_PASSWORD` | Optional | Secure password for admin order dashboard | Custom secure password |
+| `JWT_SECRET` | **Yes** | Secret key for signing admin session cookies | Random secure string |
 
-> ⚠️ **CRITICAL SECURITY NOTE**: Never commit `SUPABASE_SECRET_KEY` or `ADMIN_PASSWORD` to GitHub! Use Cloud Run Environment Variables or Google Cloud Secret Manager.
+> ⚠️ **CRITICAL SECURITY NOTE**: Never commit `SUPABASE_SECRET_KEY` or `JWT_SECRET` to GitHub! Use Cloud Run Environment Variables or Google Cloud Secret Manager.
 
 ---
 
@@ -94,8 +93,8 @@ gcloud run deploy stringart-backend \
   --platform managed \
   --allow-unauthenticated \
   --port 8080 \
-  --set-env-vars "NODE_ENV=production,SUPABASE_URL=https://your-ref.supabase.co,CLIENT_ORIGIN=https://YOUR-FRONTEND-URL.run.app,ADMIN_EMAIL=admin@stringart.io" \
-  --set-secrets "SUPABASE_SECRET_KEY=stringart-supabase-key:latest,ADMIN_PASSWORD=stringart-admin-pass:latest"
+  --set-env-vars "NODE_ENV=production,SUPABASE_URL=https://your-ref.supabase.co,CLIENT_ORIGIN=https://YOUR-FRONTEND-URL.run.app" \
+  --set-secrets "SUPABASE_SECRET_KEY=stringart-supabase-key:latest,JWT_SECRET=stringart-jwt-secret:latest"
 ```
 
 #### Using Cloud Run Console:

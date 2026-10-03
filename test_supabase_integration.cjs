@@ -119,11 +119,16 @@ async function runTests() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       },
-      { email: 'admin@stringart.io', password: 'admin123' }
+      {
+        email: process.env.INITIAL_SEED_EMAIL || 'admin@stringart.io',
+        password: process.env.INITIAL_SEED_PASSWORD || 'StringArtAdmin2026!',
+      }
     );
     console.log(`Login Status: ${loginRes.status}, Success: ${loginRes.body?.success}`);
-    if (!loginRes.body?.token) throw new Error('Admin login failed');
-    const token = loginRes.body.token;
+    const setCookie = loginRes.headers?.['set-cookie'];
+    if (!setCookie || !loginRes.body?.success) throw new Error('Admin login failed or missing cookie');
+    const cookieHeader = Array.isArray(setCookie) ? setCookie[0].split(';')[0] : setCookie.split(';')[0];
+    console.log(`   HttpOnly Cookie received: ${cookieHeader.split('=')[0]}=***`);
 
     // 3. Customer Order Creation with Base64 Images & Sequence Text
     console.log('\n3. Testing Customer Order Creation (POST /api/orders)...');
@@ -185,7 +190,7 @@ async function runTests() {
       port: PORT,
       path: `/api/admin/orders?search=${encodeURIComponent(orderNumber)}`,
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Cookie: cookieHeader },
     });
 
     console.log(`Listing Status: ${listRes.status}, Total Found: ${listRes.body?.total}`);
@@ -200,7 +205,7 @@ async function runTests() {
       port: PORT,
       path: `/api/admin/orders/${orderNumber}`,
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Cookie: cookieHeader },
     });
 
     console.log(`Detail Status: ${detailRes.status}`);
@@ -222,7 +227,7 @@ async function runTests() {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          Cookie: cookieHeader,
         },
       },
       { orderStatus: 'in_production', paymentStatus: 'paid' }
@@ -241,7 +246,7 @@ async function runTests() {
       port: PORT,
       path: `/api/admin/orders/${orderNumber}/sequence`,
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Cookie: cookieHeader },
     });
 
     console.log(`Sequence Download Status: ${seqRes.status}, Content-Type: ${seqRes.headers?.['content-type']}`);
@@ -257,7 +262,7 @@ async function runTests() {
       port: PORT,
       path: '/api/admin/stats',
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Cookie: cookieHeader },
     });
     console.log(`Stats Status: ${statsRes.status}, Total Orders: ${statsRes.body?.stats?.totalOrders}, Total Revenue: £${statsRes.body?.stats?.totalRevenue}`);
 

@@ -3,6 +3,7 @@
  * Comprehensive automated security test suite for StringArt-Backend
  */
 
+import 'dotenv/config';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,8 +34,7 @@ async function startServer(port = 3010) {
         PORT: String(currentPort),
         NODE_ENV: 'development',
         CLIENT_ORIGIN: 'http://localhost:5173',
-        ADMIN_EMAIL: 'admin@stringart.io',
-        ADMIN_PASSWORD: 'admin123',
+        JWT_SECRET: 'stringart_dev_jwt_secret_key_2026_super_secure',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -395,40 +395,124 @@ async function testGenerationRateLimit() {
 async function testAdminSecurityAndRateLimit() {
   console.log('\n--- 10. Testing Admin Security, Protected Routes & Rate Limit ---');
 
-  // 1. Protected route without auth
+  const adminEmail = process.env.INITIAL_SEED_EMAIL || 'admin@stringart.io';
+  const adminPassword = process.env.INITIAL_SEED_PASSWORD || 'StringArtAdmin2026!';
+
+  // 1. Unauthenticated access must return 401
   const resNoAuth = await fetch(`${BASE_URL}/api/admin/orders`);
   console.log(`  Admin orders without auth status: ${resNoAuth.status}`);
   if (resNoAuth.status !== 401) {
     throw new Error(`Expected 401 Unauthorized for unprotected access, got ${resNoAuth.status}`);
   }
-  console.log('  ✅ PASS: Protected admin route rejects unauthorized access.');
 
-  // 2. Admin login rate limit test (max 5 per 15 min)
-  console.log('  Testing admin login rate limiting (5 attempts)…');
-  for (let i = 1; i <= 5; i++) {
+  const resMeNoAuth = await fetch(`${BASE_URL}/api/admin/me`);
+  console.log(`  Admin /me without auth status: ${resMeNoAuth.status}`);
+  if (resMeNoAuth.status !== 401) {
+    throw new Error(`Expected 401 Unauthorized for unprotected /me, got ${resMeNoAuth.status}`);
+  }
+  console.log('  ✅ PASS: Protected admin routes reject unauthenticated access with 401.');
+
+  // 2. Successful login with cookie
+  console.log('  Testing admin login flow (valid credentials)…');
+  const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: adminEmail, password: adminPassword }),
+  });
+
+  const loginJson = await loginRes.json();
+  const setCookieHeader = loginRes.headers.get('set-cookie');
+  console.log(`  Login status: ${loginRes.status}, success: ${loginJson.success}`);
+  console.log(`  Response body token check: ${loginJson.token ? 'EXPOSED IN JSON ❌' : 'NOT in JSON response ✅'}`);
+  console.log(`  Set-Cookie header present: ${setCookieHeader ? 'YES ✅' : 'NO ❌'}`);
+
+  if (loginRes.status !== 200 || !loginJson.success || loginJson.token !== undefined) {
+    throw new Error(`Admin login failed or leaked token in body: ${JSON.stringify(loginJson)}`);
+  }
+
+  if (!setCookieHeader || !setCookieHeader.includes('admin_jwt')) {
+    throw new Error(`Admin login did not set admin_jwt cookie: ${setCookieHeader}`);
+  }
+
+  // Extract cookie value for subsequent requests
+  const cookieMatch = setCookieHeader.match(/admin_jwt=([^;]+)/);
+  if (!cookieMatch) throw new Error('Could not parse admin_jwt cookie value');
+  const authCookie = `admin_jwt=${cookieMatch[1]}`;
+
+  // 3. Test /api/admin/me with HttpOnly cookie
+  console.log('  Testing /api/admin/me with auth cookie…');
+  const meRes = await fetch(`${BASE_URL}/api/admin/me`, {
+    headers: { Cookie: authCookie },
+  });
+  const meJson = await meRes.json();
+  console.log(`  /me status: ${meRes.status}, authenticated: ${meJson.authenticated}, email: ${meJson.admin?.email}`);
+  if (meRes.status !== 200 || !meJson.authenticated || meJson.admin?.email !== adminEmail) {
+    throw new Error(`/api/admin/me validation failed: ${JSON.stringify(meJson)}`);
+  }
+  console.log('  ✅ PASS: /api/admin/me verified using HttpOnly cookie.');
+
+  // 4. Test protected admin orders with cookie
+  console.log('  Testing /api/admin/orders with auth cookie…');
+  const ordersRes = await fetch(`${BASE_URL}/api/admin/orders`, {
+    headers: { Cookie: authCookie },
+  });
+  const ordersJson = await ordersRes.json();
+  console.log(`  Admin orders status: ${ordersRes.status}, total: ${ordersJson.total}`);
+  if (ordersRes.status !== 200 || !Array.isArray(ordersJson.orders)) {
+    throw new Error(`Protected admin orders failed: ${JSON.stringify(ordersJson)}`);
+  }
+  console.log('  ✅ PASS: Protected admin orders accessible via cookie.');
+
+  // 5. Test logout clears cookie
+  console.log('  Testing /api/admin/logout…');
+  const logoutRes = await fetch(`${BASE_URL}/api/admin/logout`, {
+    method: 'POST',
+    headers: { Cookie: authCookie },
+  });
+  const logoutJson = await logoutRes.json();
+  const logoutSetCookie = logoutRes.headers.get('set-cookie');
+  console.log(`  Logout status: ${logoutRes.status}, success: ${logoutJson.success}`);
+  if (logoutRes.status !== 200 || !logoutJson.success || !logoutSetCookie) {
+    throw new Error(`Logout failed: ${JSON.stringify(logoutJson)}`);
+  }
+  console.log('  ✅ PASS: Logout clears cookie successfully.');
+
+  // 6. Access /api/admin/me after logout should return 401
+  const afterLogoutRes = await fetch(`${BASE_URL}/api/admin/me`, {
+    headers: { Cookie: 'admin_jwt=; Max-Age=0' },
+  });
+  console.log(`  Access after logout status: ${afterLogoutRes.status}`);
+  if (afterLogoutRes.status !== 401) {
+    throw new Error(`Expected 401 after logout, got ${afterLogoutRes.status}`);
+  }
+  console.log('  ✅ PASS: Unauthenticated access after logout returns 401.');
+
+  // 7. Admin login rate limit test (max 5 requests per 15 min; 1 successful request was already made)
+  console.log('  Testing admin login rate limiting (up to 5 total requests per 15 min)…');
+  for (let i = 1; i <= 4; i++) {
     const res = await fetch(`${BASE_URL}/api/admin/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'admin@stringart.io', password: 'wrongpassword' }),
+      body: JSON.stringify({ email: adminEmail, password: 'wrongpassword' }),
     });
-    console.log(`  Attempt ${i}: status ${res.status}`);
+    console.log(`  Failed attempt ${i}: status ${res.status}`);
     if (res.status !== 401) {
       throw new Error(`Expected 401 on failed attempt ${i}, got ${res.status}`);
     }
   }
 
-  // 6th attempt: MUST trigger 429
+  // Next attempt (6th total request to /api/admin/login): MUST trigger 429
   const resBlocked = await fetch(`${BASE_URL}/api/admin/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'admin@stringart.io', password: 'wrongpassword' }),
+    body: JSON.stringify({ email: adminEmail, password: 'wrongpassword' }),
   });
   const blockedJson = await resBlocked.json();
-  console.log(`  Attempt 6 status: ${resBlocked.status}, error: "${blockedJson.error}"`);
+  console.log(`  Exceeded limit attempt status: ${resBlocked.status}, error: "${blockedJson.error}"`);
   if (resBlocked.status === 429 && blockedJson.error.includes('Too many login attempts')) {
-    console.log('  ✅ PASS: Admin login rate limit enforced with HTTP 429.');
+    console.log('  ✅ PASS: Admin login rate limit enforced with HTTP 429 on 6th request.');
   } else {
-    throw new Error(`Expected 429 on 6th login attempt, got ${resBlocked.status}`);
+    throw new Error(`Expected 429 on exceeded login attempt, got ${resBlocked.status}`);
   }
 }
 

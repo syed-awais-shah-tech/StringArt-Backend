@@ -1,10 +1,16 @@
 /**
- * admin.js — Protected Admin API Route (Powered by Supabase)
+ * admin.js — Protected Admin API Route with Supabase Database & JWT Cookie Authentication
+ *
+ * Authentication:
+ *   - Admin credentials stored as bcrypt hashes in Supabase `admins` table.
+ *   - JWT issued upon successful authentication.
+ *   - JWT stored ONLY in an HttpOnly, Secure, SameSite cookie.
+ *   - No tokens in response bodies, localStorage, or headers.
  *
  * Routes:
- *   POST   /api/admin/login             — Authenticate admin (Rate-limited, timing-safe)
- *   GET    /api/admin/me                — Verify current admin session
- *   POST   /api/admin/logout            — Invalidate session
+ *   POST   /api/admin/login             — Authenticate admin & issue HttpOnly JWT cookie
+ *   POST   /api/admin/logout            — Clear authentication cookie
+ *   GET    /api/admin/me                — Verify current admin session from cookie
  *   GET    /api/admin/stats             — Dashboard metrics from Supabase
  *   GET    /api/admin/orders            — List orders with search/filter
  *   GET    /api/admin/orders/:id        — Get single order details with signed URLs
@@ -13,7 +19,8 @@
  */
 
 import { Router } from 'express';
-import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import {
   supabase,
   getSignedFileUrl,
@@ -25,117 +32,131 @@ import { adminLoginLimiter, adminEndpointsLimiter } from '../middleware/security
 
 const router = Router();
 
-// Admin credentials MUST come from environment variables — no hardcoded fallback
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+// Cookie and JWT Configuration
+export const ADMIN_COOKIE_NAME = 'admin_jwt';
+export const JWT_SECRET = process.env.JWT_SECRET || 'stringart_default_jwt_secret_dev_only';
+const isProduction = process.env.NODE_ENV === 'production';
 
-if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-  console.warn(
-    '[admin] ⚠️ ADMIN_EMAIL or ADMIN_PASSWORD is not set in environment variables.\n' +
-    'Admin login will be disabled until configured.'
-  );
-}
-
-// In-memory session store (token -> session)
-const activeSessions = new Map();
-
-/**
- * Constant-time string comparison to prevent timing-attack side channels.
- */
-function safeCompare(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) {
-    // Constant time check against itself to avoid leaking length difference timing
-    crypto.timingSafeEqual(bufA, bufA);
-    return false;
-  }
-  return crypto.timingSafeEqual(bufA, bufB);
-}
+export const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'none' : 'lax',
+  maxAge: 8 * 60 * 60 * 1000, // 8 hours
+  path: '/',
+};
 
 // ── Auth Middleware ──────────────────────────────────────────────────────────
 export function requireAdminAuth(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader?.startsWith('Bearer ')
-    ? authHeader.slice(7)
-    : req.headers['x-admin-token'] || req.query.token;
+  const token = req.cookies?.[ADMIN_COOKIE_NAME];
 
-  if (!token || !activeSessions.has(token)) {
+  if (!token) {
     return res.status(401).json({
       error: 'Unauthorized: Admin access required',
       code: 'AUTH_REQUIRED',
     });
   }
 
-  req.admin = activeSessions.get(token);
-  next();
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.admin = {
+      id: decoded.id,
+      email: decoded.email,
+      name: decoded.name || 'Store Administrator',
+    };
+    next();
+  } catch (err) {
+    return res.status(401).json({
+      error: 'Unauthorized: Session expired or invalid',
+      code: 'INVALID_TOKEN',
+    });
+  }
 }
 
 // ── POST /api/admin/login ────────────────────────────────────────────────────
-router.post('/login', adminLoginLimiter, (req, res) => {
-  const { email, password } = req.body || {};
+router.post('/login', adminLoginLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
 
-  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-    console.error('[admin] Admin login attempted but ADMIN_EMAIL/ADMIN_PASSWORD is not configured.');
-    return res.status(500).json({ error: 'Admin service authentication is not configured.' });
-  }
+    if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
 
-  if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
+    const cleanEmail = email.trim().toLowerCase();
 
-  const emailMatches = safeCompare(email.trim().toLowerCase(), ADMIN_EMAIL.trim().toLowerCase());
-  const passwordMatches = safeCompare(password, ADMIN_PASSWORD);
+    // Query admin in Supabase
+    const { data: admin, error: queryError } = await supabase
+      .from('admins')
+      .select('id, email, password_hash, name')
+      .eq('email', cleanEmail)
+      .maybeSingle();
 
-  if (emailMatches && passwordMatches) {
-    const token = 'sat_' + crypto.randomBytes(32).toString('hex');
-    const sessionData = {
-      email: ADMIN_EMAIL,
-      name: 'Store Administrator',
-      loginTime: new Date().toISOString(),
-    };
+    if (queryError) {
+      console.error('[admin] Database error during login query:', queryError.message);
+      return res.status(500).json({ error: 'Authentication service temporarily unavailable' });
+    }
 
-    activeSessions.set(token, sessionData);
+    if (!admin || !admin.password_hash) {
+      return res.status(401).json({ error: 'Invalid admin email or password' });
+    }
 
-    console.log(`[admin] Admin successfully authenticated: ${ADMIN_EMAIL}`);
+    // Verify password with bcrypt
+    const passwordValid = await bcrypt.compare(password, admin.password_hash);
+    if (!passwordValid) {
+      return res.status(401).json({ error: 'Invalid admin email or password' });
+    }
+
+    // Issue JWT with 8-hour expiry
+    const token = jwt.sign(
+      {
+        id: admin.id,
+        email: admin.email,
+        name: admin.name || 'Store Administrator',
+      },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
+    // Set HttpOnly Secure SameSite cookie
+    res.cookie(ADMIN_COOKIE_NAME, token, COOKIE_OPTIONS);
+
+    console.log(`[admin] Admin successfully authenticated: ${admin.email}`);
+
+    // Return admin details ONLY — NEVER return JWT token in the response JSON
     return res.json({
       success: true,
-      token,
-      admin: sessionData, // Never returns password
+      admin: {
+        id: admin.id,
+        email: admin.email,
+        name: admin.name || 'Store Administrator',
+      },
     });
+  } catch (err) {
+    console.error('[admin] Login error:', err.message);
+    return res.status(500).json({ error: 'An unexpected error occurred during login' });
   }
+});
 
-  // Failed login: Never log the attempted password
-  console.warn(`[admin] Failed login attempt for email: ${String(email).slice(0, 50)}`);
-  return res.status(401).json({
-    error: 'Invalid admin email or password',
-  });
+// ── POST /api/admin/logout ───────────────────────────────────────────────────
+router.post('/logout', (req, res) => {
+  const { maxAge, ...clearOptions } = COOKIE_OPTIONS;
+  res.clearCookie(ADMIN_COOKIE_NAME, clearOptions);
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
 // ── Apply general admin rate limiter & auth to all following routes ───────────
 router.use(adminEndpointsLimiter);
+router.use(requireAdminAuth);
 
 // ── GET /api/admin/me ────────────────────────────────────────────────────────
-router.get('/me', requireAdminAuth, (req, res) => {
+router.get('/me', (req, res) => {
   res.json({
     authenticated: true,
     admin: req.admin,
   });
 });
 
-// ── POST /api/admin/logout ───────────────────────────────────────────────────
-router.post('/logout', (req, res) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : req.headers['x-admin-token'];
-  if (token) {
-    activeSessions.delete(token);
-  }
-  res.json({ success: true, message: 'Logged out successfully' });
-});
-
 // ── GET /api/admin/stats ─────────────────────────────────────────────────────
-router.get('/stats', requireAdminAuth, async (_req, res) => {
+router.get('/stats', async (_req, res) => {
   try {
     const { data: rows, error } = await supabase
       .from('orders')
@@ -177,7 +198,7 @@ router.get('/stats', requireAdminAuth, async (_req, res) => {
 });
 
 // ── GET /api/admin/orders ────────────────────────────────────────────────────
-router.get('/orders', requireAdminAuth, async (req, res) => {
+router.get('/orders', async (req, res) => {
   try {
     const { search, status } = req.query;
 
@@ -224,7 +245,7 @@ router.get('/orders', requireAdminAuth, async (req, res) => {
 });
 
 // ── GET /api/admin/orders/:id ────────────────────────────────────────────────
-router.get('/orders/:id', requireAdminAuth, async (req, res) => {
+router.get('/orders/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const sanitizedId = String(id).trim().slice(0, 32);
@@ -267,7 +288,7 @@ router.get('/orders/:id', requireAdminAuth, async (req, res) => {
 });
 
 // ── PATCH /api/admin/orders/:id ──────────────────────────────────────────────
-router.patch('/orders/:id', requireAdminAuth, async (req, res) => {
+router.patch('/orders/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const sanitizedId = String(id).trim().slice(0, 32);
@@ -321,7 +342,7 @@ router.patch('/orders/:id', requireAdminAuth, async (req, res) => {
 });
 
 // ── GET /api/admin/orders/:id/sequence ───────────────────────────────────────
-router.get('/orders/:id/sequence', requireAdminAuth, async (req, res) => {
+router.get('/orders/:id/sequence', async (req, res) => {
   try {
     const { id } = req.params;
     const sanitizedId = String(id).trim().slice(0, 32);
