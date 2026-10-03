@@ -1,0 +1,91 @@
+[
+  {
+    "orderNumber": "SA-1001",
+    "createdAt": "2026-10-02T19:02:24.083Z",
+    "customer": {
+      "fullName": "Muhammad Ali",
+      "email": "ali@example.com",
+      "phone": "+92 300 1234567",
+      "address": "House 42, Street 5, Sector F-7/2",
+      "city": "Islamabad"
+    },
+    "product": {
+      "name": "Custom String Art Kit & Framed Portrait",
+      "price": 8500,
+      "currency": "PKR"
+    },
+    "paymentMethod": "COD",
+    "paymentStatus": "paid",
+    "orderStatus": "new",
+    "files": {
+      "originalImage": "orders/SA-1001-original.png",
+      "previewImage": "orders/SA-1001-preview.png",
+      "sequenceFile": "orders/SA-1001-sequence.txt"
+    },
+    "metadata": {
+      "totalLines": 3000,
+      "boardSize": "50 cm circular",
+      "numNails": 200
+    },
+    "updatedAt": "2026-10-02T19:03:38.908Z"
+  },
+  {
+    "orderNumber": "SA-1002",
+    "createdAt": "2026-10-02T19:03:48.842Z",
+    "customer": {
+      "fullName": "Emma Watson",
+      "email": "emma@example.co.uk",
+      "phone": "+44 7700 900123",
+      "address": "15 High Street, Apartment 4B",
+      "city": "Oxford"
+    },
+    "product": {
+      "name": "Custom Handcrafted String Art (50 cm)",
+      "price": 175,
+      "currency": "GBP"
+    },
+    "paymentMethod": "COD",
+    "paymentStatus": "pending",
+    "orderStatus": "new",
+    "files": {
+      "originalImage": "orders/SA-1002-original.jpg",
+      "previewImage": "orders/SA-1002-preview.png",
+      "sequenceFile": "orders/SA-1002-sequence.txt"
+    },
+    "metadata": {
+      "totalLines": 300,
+      "boardSize": "50 cm circular",
+      "numNails": 200
+    }
+  },
+  {
+    "orderNumber": "SA-1003",
+    "createdAt": "2026-10-02T19:12:58.282Z",
+    "customer": {
+      "fullName": "Dr. Sarah Connor",
+      "email": "sarah.connor@example.com",
+      "phone": "+44 7700 900456",
+      "address": "221B Baker Street, Suite 4",
+      "city": "London"
+    },
+    "product": {
+      "name": "Custom Handcrafted String Art (50 cm)",
+      "price": 175,
+      "currency": "GBP"
+    },
+    "paymentMethod": "COD",
+    "paymentStatus": "paid",
+    "orderStatus": "shipped",
+    "files": {
+      "originalImage": "orders/SA-1003-original.png",
+      "previewImage": "orders/SA-1003-preview.png",
+      "sequenceFile": "orders/SA-1003-sequence.txt"
+    },
+    "metadata": {
+      "totalLines": 300,
+      "boardSize": "50 cm circular",
+      "numNails": 200
+    },
+    "updatedAt": "2026-10-02T19:12:58.342Z"
+  }
+]
