@@ -9,8 +9,11 @@
  *
  * Routes:
  *   POST   /api/admin/login             — Authenticate admin & issue HttpOnly JWT cookie
+ *   POST   /api/admin/forgot-password   — Request password reset link (dispatches email)
+ *   POST   /api/admin/reset-password    — Set new password using single-use reset token
  *   POST   /api/admin/logout            — Clear authentication cookie
  *   GET    /api/admin/me                — Verify current admin session from cookie
+ *   POST   /api/admin/change-password   — Change password for authenticated admin
  *   GET    /api/admin/stats             — Dashboard metrics from Supabase
  *   GET    /api/admin/orders            — List orders with search/filter
  *   GET    /api/admin/orders/:id        — Get single order details with signed URLs
@@ -19,6 +22,7 @@
  */
 
 import { Router } from 'express';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import {
@@ -28,7 +32,13 @@ import {
   downloadStorageBuffer,
   mapOrderRowToModel,
 } from '../supabase.js';
-import { adminLoginLimiter, adminEndpointsLimiter } from '../middleware/security.js';
+import {
+  adminLoginLimiter,
+  adminForgotPasswordLimiter,
+  adminResetPasswordLimiter,
+  adminEndpointsLimiter,
+} from '../middleware/security.js';
+import { sendPasswordResetEmail } from '../services/email.js';
 
 const router = Router();
 
@@ -136,6 +146,165 @@ router.post('/login', adminLoginLimiter, async (req, res) => {
   }
 });
 
+// ── POST /api/admin/forgot-password ──────────────────────────────────────────
+router.post('/forgot-password', adminForgotPasswordLimiter, async (req, res) => {
+  const genericSuccessMsg = 'If this email is registered as an administrator, a password reset link has been sent.';
+
+  try {
+    const { email } = req.body || {};
+
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email address is required' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Look up admin in Supabase
+    const { data: admin, error: queryError } = await supabase
+      .from('admins')
+      .select('id, email')
+      .eq('email', cleanEmail)
+      .maybeSingle();
+
+    if (queryError) {
+      console.error('[admin] Database error looking up admin for password reset:', queryError.message);
+      // Return 200 with generic message to prevent oracle/timing disclosure
+      return res.json({ success: true, message: genericSuccessMsg });
+    }
+
+    // Do NOT reveal whether the email exists
+    if (!admin) {
+      return res.json({ success: true, message: genericSuccessMsg });
+    }
+
+    // Generate cryptographically secure random reset token
+    const rawToken = crypto.randomBytes(32).toString('hex');
+
+    // Store ONLY the SHA-256 hash of the token in Supabase
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    // Token expires after 30 minutes
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+    const { error: updateError } = await supabase
+      .from('admins')
+      .update({
+        reset_token_hash: tokenHash,
+        reset_token_expires: expiresAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', admin.id);
+
+    if (updateError) {
+      console.error('[admin] Failed to save reset token hash:', updateError.message);
+      return res.json({ success: true, message: genericSuccessMsg });
+    }
+
+    // Send reset email with reset link
+    const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+    const resetUrl = `${clientOrigin.replace(/\/$/, '')}/admin/reset-password?token=${rawToken}`;
+
+    await sendPasswordResetEmail({
+      to: admin.email,
+      resetUrl,
+    });
+
+    console.log(`[admin] Password reset link dispatched for administrator account`);
+
+    // Never return the reset token in the API response
+    return res.json({
+      success: true,
+      message: genericSuccessMsg,
+    });
+  } catch (err) {
+    console.error('[admin] Forgot password error:', err.message);
+    return res.status(500).json({ error: 'Unable to process password reset request at this time.' });
+  }
+});
+
+// ── POST /api/admin/reset-password ───────────────────────────────────────────
+router.post('/reset-password', adminResetPasswordLimiter, async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body || {};
+
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'Reset token is required' });
+    }
+
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'Passwords do not match' });
+    }
+
+    // Hash incoming token to match stored hash
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+
+    // Find admin by token hash
+    const { data: admin, error: queryError } = await supabase
+      .from('admins')
+      .select('id, email, reset_token_hash, reset_token_expires')
+      .eq('reset_token_hash', tokenHash)
+      .maybeSingle();
+
+    if (queryError) {
+      console.error('[admin] Database error during password reset verification:', queryError.message);
+      return res.status(500).json({ error: 'Service temporarily unavailable' });
+    }
+
+    if (!admin || !admin.reset_token_expires) {
+      return res.status(400).json({ error: 'Invalid or expired password reset link' });
+    }
+
+    // Verify token has not expired
+    const isExpired = new Date(admin.reset_token_expires) < new Date();
+    if (isExpired) {
+      // Invalidate the expired token immediately
+      await supabase
+        .from('admins')
+        .update({
+          reset_token_hash: null,
+          reset_token_expires: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', admin.id);
+
+      return res.status(400).json({ error: 'Password reset link has expired. Please request a new one.' });
+    }
+
+    // Hash the new password with bcrypt (salt rounds 12)
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+
+    // Update admins table: new password_hash, delete reset_token_hash and reset_token_expires (single-use!)
+    const { error: updateError } = await supabase
+      .from('admins')
+      .update({
+        password_hash: passwordHash,
+        reset_token_hash: null,
+        reset_token_expires: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', admin.id);
+
+    if (updateError) {
+      console.error('[admin] Database error updating password hash:', updateError.message);
+      return res.status(500).json({ error: 'Failed to update password' });
+    }
+
+    console.log(`[admin] Password successfully reset for admin: ${admin.email}`);
+
+    return res.json({
+      success: true,
+      message: 'Password has been reset successfully. You can now log in with your new password.',
+    });
+  } catch (err) {
+    console.error('[admin] Reset password error:', err.message);
+    return res.status(500).json({ error: 'An unexpected error occurred while resetting password' });
+  }
+});
+
 // ── POST /api/admin/logout ───────────────────────────────────────────────────
 router.post('/logout', (req, res) => {
   const { maxAge, ...clearOptions } = COOKIE_OPTIONS;
@@ -153,6 +322,74 @@ router.get('/me', (req, res) => {
     authenticated: true,
     admin: req.admin,
   });
+});
+
+// ── POST /api/admin/change-password ──────────────────────────────────────────
+router.post('/change-password', async (req, res) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body || {};
+
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      return res.status(400).json({ error: 'Current password is required' });
+    }
+
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long' });
+    }
+
+    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'New password and confirmation do not match' });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ error: 'New password must be different from current password' });
+    }
+
+    // Fetch current admin password hash from Supabase
+    const { data: admin, error: queryError } = await supabase
+      .from('admins')
+      .select('id, email, password_hash')
+      .eq('id', req.admin.id)
+      .maybeSingle();
+
+    if (queryError || !admin) {
+      console.error('[admin] Failed to fetch admin record for change password:', queryError?.message);
+      return res.status(500).json({ error: 'Service temporarily unavailable' });
+    }
+
+    // Verify current password with bcrypt
+    const isCurrentValid = await bcrypt.compare(currentPassword, admin.password_hash);
+    if (!isCurrentValid) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+
+    // Hash new password with bcrypt (salt rounds 12)
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+
+    // Update in Supabase
+    const { error: updateError } = await supabase
+      .from('admins')
+      .update({
+        password_hash: passwordHash,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', admin.id);
+
+    if (updateError) {
+      console.error('[admin] Database error saving changed password:', updateError.message);
+      return res.status(500).json({ error: 'Failed to update password' });
+    }
+
+    console.log(`[admin] Password changed successfully for admin: ${admin.email}`);
+
+    return res.json({
+      success: true,
+      message: 'Password changed successfully',
+    });
+  } catch (err) {
+    console.error('[admin] Change password error:', err.message);
+    return res.status(500).json({ error: 'An unexpected error occurred while changing password' });
+  }
 });
 
 // ── GET /api/admin/stats ─────────────────────────────────────────────────────

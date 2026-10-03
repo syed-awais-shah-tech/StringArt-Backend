@@ -66,3 +66,28 @@ export const adminEndpointsLimiter = rateLimit({
   message: { error: 'Too many admin requests. Please slow down.' },
   statusCode: 429,
 });
+
+/**
+ * 6. Admin forgot password: 5 requests per IP per 15 minutes
+ */
+export const adminForgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password reset requests. Please try again after 15 minutes.' },
+  statusCode: 429,
+});
+
+/**
+ * 7. Admin reset password: 5 requests per IP per 15 minutes
+ */
+export const adminResetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many reset attempts. Please try again after 15 minutes.' },
+  statusCode: 429,
+});
+
