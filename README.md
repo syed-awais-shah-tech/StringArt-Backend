@@ -37,6 +37,7 @@ The backend consists of two main pillars:
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Health check and engine status |
 | `POST` | `/api/generate` | Multipart photo upload $\rightarrow$ generates string art lines & sequence |
+| `GET` | `/api/settings/generation` | Public generation settings (e.g., eightColorEnabled) |
 | `POST` | `/api/orders` | Places customer Cash on Delivery (COD) order |
 | `GET` | `/api/orders/:id` | Retrieves order details by order number |
 
@@ -54,6 +55,8 @@ The backend consists of two main pillars:
 | `GET` | `/api/admin/orders/:id` | Full order details with inline sequence preview |
 | `PATCH` | `/api/admin/orders/:id` | Updates `orderStatus` and/or `paymentStatus` |
 | `GET` | `/api/admin/orders/:id/sequence` | Streams the physical workshop sequence file (`.txt`) |
+| `GET` | `/api/admin/settings` | Retrieves current store settings |
+| `PATCH` | `/api/admin/settings` | Updates store settings (e.g., eight_color_enabled) |
 
 ---
 
