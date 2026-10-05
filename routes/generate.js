@@ -17,6 +17,13 @@ import { generateNails } from '../engine/nailGenerator.js';
 import { generate } from '../engine/scoreCalculator.js';
 import { formatSequence } from '../engine/sequenceFormatter.js';
 import { generateLimiter } from '../middleware/security.js';
+import { getStoreSettings } from '../services/settingsService.js';
+import {
+  resolveThreadModeAndColors,
+  THREAD_MODES,
+  BLACK_ONLY_PALETTE,
+  FIXED_EIGHT_COLOR_PALETTE,
+} from '../engine/palette.js';
 
 const router = Router();
 
@@ -58,21 +65,10 @@ const handleUpload = (req, res, next) => {
   });
 };
 
-// Default thread color palette — matches algorithm default
-const DEFAULT_COLORS = [
-  [0, 0, 0],
-  [255, 255, 255],
-  [255, 0, 0],
-  [0, 255, 0],
-  [0, 255, 0],
-  [255, 0, 255],
-  [0, 255, 255],
-  [255, 255, 0],
-];
-
 /**
  * Validate and sanitize generation parameters.
  * Rejects negative, NaN, infinite, or abusive values.
+ * Arbitrary thread colors are disallowed: palette is resolved server-side.
  */
 function validateGenerationParams(rawParams) {
   const errors = [];
@@ -168,35 +164,10 @@ function validateGenerationParams(rawParams) {
     defaultValue: 0,
   });
 
-  // Colors validation
-  let colors = DEFAULT_COLORS;
-  if (rawParams.colors !== undefined) {
-    if (!Array.isArray(rawParams.colors)) {
-      errors.push('colors must be an array of RGB triplets.');
-    } else if (rawParams.colors.length > 16) {
-      errors.push('colors array cannot exceed 16 palette entries.');
-    } else if (rawParams.colors.length > 0) {
-      const parsedColors = [];
-      for (let i = 0; i < rawParams.colors.length; i++) {
-        const c = rawParams.colors[i];
-        if (!Array.isArray(c) || c.length !== 3) {
-          errors.push(`Color at index ${i} must be an [R, G, B] array.`);
-          break;
-        }
-        const r = Number(c[0]);
-        const g = Number(c[1]);
-        const b = Number(c[2]);
-        if (![r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) {
-          errors.push(`Color components at index ${i} must be integers between 0 and 255.`);
-          break;
-        }
-        parsedColors.push([r, g, b]);
-      }
-      if (errors.length === 0 && parsedColors.length > 0) {
-        colors = parsedColors;
-      }
-    }
-  }
+  // Thread mode requested by client (e.g. 'black_only' or 'eight_color')
+  const requestedThreadMode = typeof (rawParams.threadMode || rawParams.thread_mode) === 'string'
+    ? String(rawParams.threadMode || rawParams.thread_mode).trim().toLowerCase()
+    : undefined;
 
   // Project name: sanitize, max 50 chars, never trust raw filename
   const safeBaseName = typeof rawParams.name === 'string'
@@ -219,7 +190,7 @@ function validateGenerationParams(rawParams) {
       brightness,
       contrast,
       bgThreshold,
-      colors,
+      requestedThreadMode,
       projectName,
     },
   };
@@ -264,9 +235,18 @@ router.post('/generate', generateLimiter, handleUpload, async (req, res) => {
       contrast,
       bgThreshold,
       imageSize,
-      colors,
+      requestedThreadMode,
       projectName,
     } = params;
+
+    // ── Resolve thread mode from store settings & customer request ──────────
+    const { eight_color_enabled } = await getStoreSettings();
+    const candidateMode = requestedThreadMode || req.body.threadMode || req.body.thread_mode;
+    const { effectiveMode, colors } = resolveThreadModeAndColors(eight_color_enabled, candidateMode);
+
+    console.log(
+      `[generate] Admin 8-color enabled: ${eight_color_enabled}, requested: "${candidateMode || 'default'}", effective: "${effectiveMode}" (${colors.length} threads)`
+    );
 
     // ── Process image in memory ──────────────────────────────────────────────
     console.log(`[generate] Processing image (${imageSize}×${imageSize})…`);
@@ -321,11 +301,13 @@ router.post('/generate', generateLimiter, handleUpload, async (req, res) => {
       totalLines: sequence.length,
     };
 
-    // ── Safe response (server-generated filename) ───────────────────────────
+    // ── Safe response (server-generated filename & effective mode) ───────────
     res.json({
       sequenceText,
       previewData: previewPayload,
       filename: `${projectName}.txt`,
+      threadMode: effectiveMode,
+      thread_mode: effectiveMode,
     });
   } catch (err) {
     console.error('[generate] Error:', err.message);
@@ -333,6 +315,21 @@ router.post('/generate', generateLimiter, handleUpload, async (req, res) => {
     res.status(500).json({
       error: isProd ? 'An error occurred during generation.' : (err.message || 'Internal server error'),
     });
+  }
+});
+
+// ── GET /api/settings/generation ─────────────────────────────────────────────
+// Safe public endpoint exposing whether 8-color generation is allowed
+router.get('/settings/generation', async (_req, res) => {
+  try {
+    const { eight_color_enabled } = await getStoreSettings();
+    res.json({
+      eightColorEnabled: Boolean(eight_color_enabled),
+      eight_color_enabled: Boolean(eight_color_enabled),
+    });
+  } catch (err) {
+    console.error('[generate] Error fetching generation settings:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve generation settings' });
   }
 });
 

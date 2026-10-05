@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "node --watch index.js",
     "start": "node index.js",
+    "test": "node test_admin_settings_thread_modes.mjs",
+    "test:modes": "node test_admin_settings_thread_modes.mjs",
     "test:supabase": "node test_supabase_integration.cjs"
   },
   "dependencies": {

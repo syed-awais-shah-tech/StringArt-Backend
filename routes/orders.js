@@ -15,8 +15,10 @@ import {
   uploadBase64ToStorage,
   uploadTextToStorage,
   mapOrderRowToModel,
+  recordOrderThreadMode,
 } from '../supabase.js';
 import { createOrderLimiter } from '../middleware/security.js';
+import { getStoreSettings } from '../services/settingsService.js';
 
 const router = Router();
 
@@ -209,7 +211,17 @@ router.post('/orders', createOrderLimiter, async (req, res) => {
       }
     }
 
-    // ── 5. Database Insert with Server-Side Authoritative Values ────────────
+    // ── 5. Resolve Effective Thread Mode (Server-Authoritative) ──────────────
+    const { eight_color_enabled } = await getStoreSettings();
+    const candidateThreadMode = req.body.threadMode || req.body.thread_mode;
+    let effectiveThreadMode = 'black_only';
+    if (eight_color_enabled && candidateThreadMode === 'eight_color') {
+      effectiveThreadMode = 'eight_color';
+    } else {
+      effectiveThreadMode = 'black_only';
+    }
+
+    // ── 6. Database Insert with Server-Side Authoritative Values ────────────
     const orderPayload = {
       order_number: orderNumber,
       full_name: customer.fullName.trim(),
@@ -225,16 +237,20 @@ router.post('/orders', createOrderLimiter, async (req, res) => {
       original_file_path: originalFilePath,
       preview_file_path: previewFilePath,
       sequence_file_path: sequenceFilePath,
+      thread_mode: effectiveThreadMode,
       idempotency_key: idempotencyKey,
     };
 
-    const { data: insertedOrder, error: insertError } = await supabase
+    let insertedOrder = null;
+    const { data: directInsert, error: insertError } = await supabase
       .from('orders')
       .insert(orderPayload)
       .select()
       .single();
 
-    if (insertError) {
+    if (!insertError && directInsert) {
+      insertedOrder = directInsert;
+    } else if (insertError) {
       // If concurrent request inserted same idempotency_key, handle gracefully
       if (insertError.code === '23505' || String(insertError.message).includes('idempotency_key')) {
         const { data: duplicateOrder } = await supabase
@@ -252,15 +268,40 @@ router.post('/orders', createOrderLimiter, async (req, res) => {
         }
       }
 
-      console.error('[orders] Database insert error:', insertError.message);
-      const isProd = process.env.NODE_ENV === 'production';
-      return res.status(500).json({
-        error: isProd ? 'Failed to save order to database.' : insertError.message,
-      });
+      // If the column thread_mode is not yet in Supabase schema cache, retry without column
+      if (String(insertError.message).includes('thread_mode') || insertError.code === 'PGRST204') {
+        console.warn('[orders] thread_mode column not found in schema cache. Inserting fallback without column.');
+        const { thread_mode, ...safePayload } = orderPayload;
+        const { data: retryData, error: retryErr } = await supabase
+          .from('orders')
+          .insert(safePayload)
+          .select()
+          .single();
+
+        if (!retryErr && retryData) {
+          retryData.thread_mode = effectiveThreadMode;
+          insertedOrder = retryData;
+        } else {
+          console.error('[orders] Database fallback insert error:', retryErr?.message);
+        }
+      }
+
+      if (!insertedOrder) {
+        console.error('[orders] Database insert error:', insertError.message);
+        const isProd = process.env.NODE_ENV === 'production';
+        return res.status(500).json({
+          error: isProd ? 'Failed to save order to database.' : insertError.message,
+        });
+      }
     }
 
+    recordOrderThreadMode(orderNumber, effectiveThreadMode);
+    insertedOrder.thread_mode = insertedOrder.thread_mode || effectiveThreadMode;
     const appOrder = mapOrderRowToModel(insertedOrder);
-    console.log(`[orders] Created order ${orderNumber} for ${appOrder.customer.fullName}`);
+    appOrder.thread_mode = effectiveThreadMode;
+    appOrder.threadMode = effectiveThreadMode;
+
+    console.log(`[orders] Created order ${orderNumber} (${effectiveThreadMode}) for ${appOrder.customer.fullName}`);
 
     return res.status(201).json({
       success: true,

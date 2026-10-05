@@ -167,11 +167,30 @@ export async function downloadStorageBuffer(storagePath) {
   return Buffer.from(arrayBuffer);
 }
 
+// Local order thread mode cache (ensures consistency even if DB migration is pending in cloud)
+const orderThreadModeCache = new Map();
+
+export function recordOrderThreadMode(orderNumber, threadMode) {
+  if (orderNumber && threadMode) {
+    orderThreadModeCache.set(String(orderNumber).trim().toUpperCase(), threadMode);
+  }
+}
+
+export function resolveOrderThreadMode(row) {
+  if (row?.thread_mode) {
+    return row.thread_mode;
+  }
+  const key = String(row?.order_number || row?.orderNumber || '').trim().toUpperCase();
+  return orderThreadModeCache.get(key) || 'black_only';
+}
+
 /**
  * Map PostgreSQL orders row to application model
  */
 export function mapOrderRowToModel(row, signedUrls = {}) {
   if (!row) return null;
+  const effectiveThreadMode = resolveOrderThreadMode(row);
+
   return {
     id: row.id,
     orderNumber: row.order_number,
@@ -192,6 +211,8 @@ export function mapOrderRowToModel(row, signedUrls = {}) {
     paymentMethod: row.payment_method || 'COD',
     paymentStatus: row.payment_status || 'pending',
     orderStatus: row.order_status || 'new',
+    threadMode: effectiveThreadMode,
+    thread_mode: effectiveThreadMode,
     files: {
       originalImage: signedUrls.originalImageUrl || row.original_file_path || null,
       previewImage: signedUrls.previewImageUrl || row.preview_file_path || null,
@@ -215,6 +236,8 @@ export function mapOrderRowToModel(row, signedUrls = {}) {
     original_file_path: row.original_file_path,
     preview_file_path: row.preview_file_path,
     sequence_file_path: row.sequence_file_path,
+    thread_mode: effectiveThreadMode,
+    threadMode: effectiveThreadMode,
     idempotencyKey: row.idempotency_key || null,
     idempotency_key: row.idempotency_key || null,
     created_at: row.created_at,

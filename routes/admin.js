@@ -39,6 +39,7 @@ import {
   adminEndpointsLimiter,
 } from '../middleware/security.js';
 import { sendPasswordResetEmail } from '../services/email.js';
+import { getStoreSettings, updateStoreSettings } from '../services/settingsService.js';
 
 const router = Router();
 
@@ -322,6 +323,64 @@ router.get('/me', (req, res) => {
     authenticated: true,
     admin: req.admin,
   });
+});
+
+// ── GET /api/admin/settings ──────────────────────────────────────────────────
+router.get('/settings', async (_req, res) => {
+  try {
+    const settings = await getStoreSettings();
+    res.json({
+      success: true,
+      settings,
+      eight_color_enabled: settings.eight_color_enabled,
+      eightColorEnabled: settings.eightColorEnabled,
+    });
+  } catch (err) {
+    console.error('[admin] Error fetching store settings:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to retrieve settings' : err.message });
+  }
+});
+
+// ── PATCH /api/admin/settings ────────────────────────────────────────────────
+// Allows admin to change: eight_color_enabled
+router.patch('/settings', async (req, res) => {
+  try {
+    const { eight_color_enabled, eightColorEnabled } = req.body || {};
+
+    const targetValue = eight_color_enabled !== undefined ? eight_color_enabled : eightColorEnabled;
+
+    if (targetValue === undefined) {
+      return res.status(400).json({
+        error: 'eight_color_enabled is required and must be a boolean.',
+      });
+    }
+
+    if (
+      typeof targetValue !== 'boolean' &&
+      targetValue !== 'true' &&
+      targetValue !== 'false'
+    ) {
+      return res.status(400).json({
+        error: 'eight_color_enabled must be a boolean (true or false).',
+      });
+    }
+
+    const updated = await updateStoreSettings({ eight_color_enabled: targetValue });
+    console.log(`[admin] Updated 8-color generation setting to: ${updated.eight_color_enabled} by ${req.admin?.email}`);
+
+    res.json({
+      success: true,
+      message: 'Store settings updated successfully',
+      settings: updated,
+      eight_color_enabled: updated.eight_color_enabled,
+      eightColorEnabled: updated.eightColorEnabled,
+    });
+  } catch (err) {
+    console.error('[admin] Error updating store settings:', err.message);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.status(500).json({ error: isProd ? 'Failed to update settings' : err.message });
+  }
 });
 
 // ── POST /api/admin/change-password ──────────────────────────────────────────

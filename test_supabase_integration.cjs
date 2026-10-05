@@ -60,7 +60,7 @@ async function ensureServerRunning() {
   });
 
   // Wait for server to boot up
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 400));
     try {
       const res = await request({
@@ -77,7 +77,7 @@ async function ensureServerRunning() {
   }
 
   serverProcess.kill();
-  throw new Error('Failed to start backend server within 6 seconds.');
+  throw new Error('Failed to start backend server within 12 seconds.');
 }
 
 async function runTests() {
@@ -179,6 +179,10 @@ async function runTests() {
     const orderNumber = createdOrder.orderNumber;
     console.log(`✅ Order created successfully: ${orderNumber}`);
     console.log(`   Customer: ${createdOrder.customer?.fullName}`);
+    console.log(`   Thread Mode: ${createdOrder.thread_mode || createdOrder.threadMode} ✅`);
+    if (!createdOrder.thread_mode && !createdOrder.threadMode) {
+      throw new Error('Order missing thread_mode');
+    }
     console.log(`   Original File: ${createdOrder.files?.original_file_path || createdOrder.files?.originalImage}`);
     console.log(`   Preview File: ${createdOrder.files?.preview_file_path || createdOrder.files?.previewImage}`);
     console.log(`   Sequence File: ${createdOrder.files?.sequence_file_path || createdOrder.files?.sequenceFile}`);

@@ -19,12 +19,14 @@ export const generalLimiter = rateLimit({
   statusCode: 429,
 });
 
+const isTestEnv = process.env.NODE_ENV === 'test';
+
 /**
  * 2. Generate endpoint: 3 requests per IP per 10 minutes
  */
 export const generateLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 3,
+  max: isTestEnv ? 1000 : 3,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many generation requests. Please wait 10 minutes before generating another design.' },
